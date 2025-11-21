@@ -153,5 +153,5 @@ Projeto acadêmico — livre para estudo e evolução.
 ---
 
 <div align="center">
-Feito com ❤️ para o TCC — DropWarnify  
+Feito para o TCC — DropWarnify  
 </div>

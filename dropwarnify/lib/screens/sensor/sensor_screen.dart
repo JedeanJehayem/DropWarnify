@@ -1,10 +1,5 @@
-import 'dart:async';
-import 'dart:math';
-
 import 'package:flutter/material.dart';
-import 'package:sensors_plus/sensors_plus.dart';
-
-enum MovementType { normal, nearFall, fall }
+import 'package:dropwarnify/services/wear_sensor_monitor.dart';
 
 class SensorScreen extends StatefulWidget {
   /// Callback chamado quando for detectada uma QUEDA real
@@ -20,15 +15,9 @@ class SensorScreen extends StatefulWidget {
 }
 
 class _SensorScreenState extends State<SensorScreen> {
-  // Subscrições dos sensores
-  StreamSubscription<AccelerometerEvent>? _accelSub;
-  StreamSubscription<GyroscopeEvent>? _gyroSub;
+  late WearSensorMonitor _monitor;
 
-  // Leituras atuais
-  double _accelX = 0, _accelY = 0, _accelZ = 0;
-  double _gyroX = 0, _gyroY = 0, _gyroZ = 0;
-
-  // Info derivada
+  // Leituras derivadas para exibir na UI
   double _accelTotal = 0;
   double _gyroTotal = 0;
 
@@ -37,134 +26,54 @@ class _SensorScreenState extends State<SensorScreen> {
   String _statusTexto = 'Monitorando sensores em tempo real...';
   Color _statusColor = Colors.green.shade600;
 
-  DateTime _lastTriggerTime = DateTime.fromMillisecondsSinceEpoch(0);
-  final Duration _cooldown = const Duration(seconds: 3);
-
   @override
   void initState() {
     super.initState();
-    _startListeningSensors();
+
+    _monitor = WearSensorMonitor(
+      // callbacks de detecção de movimento
+      onMovementChanged: (movement) {
+        setState(() {
+          _lastMovement = movement;
+          _accelTotal = _monitor.accelTotal;
+          _gyroTotal = _monitor.gyroTotal;
+
+          switch (movement) {
+            case MovementType.normal:
+              _statusTexto = 'Movimento normal detectado.';
+              _statusColor = Colors.green.shade600;
+              break;
+            case MovementType.nearFall:
+              _statusTexto =
+                  'Quase queda detectada (desequilíbrio forte, mas sem impacto completo).';
+              _statusColor = Colors.orange.shade600;
+              break;
+            case MovementType.fall:
+              _statusTexto =
+                  'Possível QUEDA detectada! Verificando necessidade de alerta.';
+              _statusColor = Colors.red.shade700;
+              break;
+          }
+        });
+      },
+      // repassa os callbacks externos (Home) para o serviço
+      onFall: widget.onFall,
+      onNearFall: widget.onNearFall,
+      cooldown: const Duration(seconds: 3),
+    );
+
+    _monitor.start();
   }
 
   @override
   void dispose() {
-    _accelSub?.cancel();
-    _gyroSub?.cancel();
+    _monitor.dispose();
     super.dispose();
   }
 
-  // ========= LÓGICA DE CÁLCULO =========
+  // ========= UI PARA CELULAR =========
 
-  double _calcularAceleracaoTotal(double x, double y, double z) {
-    // magnitude do vetor de aceleração
-    return sqrt(x * x + y * y + z * z);
-  }
-
-  double _calcularVelocidadeAngularTotal(double x, double y, double z) {
-    // magnitude do vetor de rotação
-    return sqrt(x * x + y * y + z * z);
-  }
-
-  MovementType _detectarMovimento({
-    required double accelTotal,
-    required double gyroTotal,
-  }) {
-    // Limiar de QUEDA (baseado no que você colocou no TCC)
-    // Queda: aceleração > 3g e giro > 150°/s
-    // Quase queda: aceleração > 2g e giro > 50°/s (mas abaixo de queda)
-    const double g = 9.81;
-
-    final double limiarQuedaAccel = 3 * g; // ~29.4
-    const double limiarQuedaGyro = 150.0;
-
-    final double limiarNearAccel = 2 * g; // ~19.6
-    const double limiarNearGyro = 50.0;
-
-    if (accelTotal >= limiarQuedaAccel && gyroTotal >= limiarQuedaGyro) {
-      return MovementType.fall;
-    }
-
-    if (accelTotal >= limiarNearAccel && gyroTotal >= limiarNearGyro) {
-      return MovementType.nearFall;
-    }
-
-    return MovementType.normal;
-  }
-
-  // ========= LISTENERS DOS SENSORES =========
-
-  void _startListeningSensors() {
-    _accelSub = accelerometerEvents.listen((AccelerometerEvent event) {
-      _accelX = event.x;
-      _accelY = event.y;
-      _accelZ = event.z;
-      _processNewSample();
-    });
-
-    _gyroSub = gyroscopeEvents.listen((GyroscopeEvent event) {
-      _gyroX = event.x;
-      _gyroY = event.y;
-      _gyroZ = event.z;
-      _processNewSample();
-    });
-  }
-
-  void _processNewSample() {
-    // Recalcula as magnitudes
-    final accelTotal = _calcularAceleracaoTotal(_accelX, _accelY, _accelZ);
-    final gyroTotal = _calcularVelocidadeAngularTotal(_gyroX, _gyroY, _gyroZ);
-
-    final movement = _detectarMovimento(
-      accelTotal: accelTotal,
-      gyroTotal: gyroTotal,
-    );
-
-    setState(() {
-      _accelTotal = accelTotal;
-      _gyroTotal = gyroTotal;
-      _lastMovement = movement;
-
-      switch (movement) {
-        case MovementType.normal:
-          _statusTexto = 'Movimento normal detectado.';
-          _statusColor = Colors.green.shade600;
-          break;
-        case MovementType.nearFall:
-          _statusTexto =
-              'Quase queda detectada (desequilíbrio forte, mas sem impacto completo).';
-          _statusColor = Colors.orange.shade600;
-          break;
-        case MovementType.fall:
-          _statusTexto =
-              'Possível QUEDA detectada! Verificando necessidade de alerta.';
-          _statusColor = Colors.red.shade700;
-          break;
-      }
-    });
-
-    _maybeTriggerCallbacks(movement);
-  }
-
-  void _maybeTriggerCallbacks(MovementType movement) {
-    final now = DateTime.now();
-    if (now.difference(_lastTriggerTime) < _cooldown) {
-      // ainda dentro do cooldown, ignora para não disparar vários eventos
-      return;
-    }
-
-    if (movement == MovementType.fall && widget.onFall != null) {
-      _lastTriggerTime = now;
-      widget.onFall!();
-    } else if (movement == MovementType.nearFall && widget.onNearFall != null) {
-      _lastTriggerTime = now;
-      widget.onNearFall!();
-    }
-  }
-
-  // ========= UI =========
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildPhoneLayout(BuildContext context) {
     final themeBlue = Colors.blue.shade700;
 
     return Scaffold(
@@ -224,10 +133,7 @@ class _SensorScreenState extends State<SensorScreen> {
                   ),
                 ),
               ),
-
               const SizedBox(height: 16),
-
-              // Leituras numéricas só pra debug / estudo
               Card(
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(18),
@@ -247,40 +153,34 @@ class _SensorScreenState extends State<SensorScreen> {
                       ),
                       const SizedBox(height: 10),
                       Text(
-                        'Acelerômetro (x, y, z): '
-                        '${_accelX.toStringAsFixed(2)}, '
-                        '${_accelY.toStringAsFixed(2)}, '
-                        '${_accelZ.toStringAsFixed(2)}  m/s²',
+                        'Aceleração total (|a|): '
+                        '${_accelTotal.toStringAsFixed(2)} m/s²',
                         style: const TextStyle(fontSize: 13),
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'Aceleração total: ${_accelTotal.toStringAsFixed(2)} m/s²',
+                        'Velocidade angular total (|ω|): '
+                        '${_gyroTotal.toStringAsFixed(2)} °/s',
                         style: const TextStyle(fontSize: 13),
                       ),
                       const SizedBox(height: 12),
                       Text(
-                        'Giroscópio (x, y, z): '
-                        '${_gyroX.toStringAsFixed(2)}, '
-                        '${_gyroY.toStringAsFixed(2)}, '
-                        '${_gyroZ.toStringAsFixed(2)}  °/s',
-                        style: const TextStyle(fontSize: 13),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Velocidade angular total: ${_gyroTotal.toStringAsFixed(2)} °/s',
+                        'Último tipo de movimento: '
+                        '${_lastMovement == MovementType.fall
+                            ? 'QUEDA'
+                            : _lastMovement == MovementType.nearFall
+                            ? 'QUASE QUEDA'
+                            : 'normal'}',
                         style: const TextStyle(fontSize: 13),
                       ),
                     ],
                   ),
                 ),
               ),
-
               const SizedBox(height: 16),
-
               Text(
                 'Os dados são analisados continuamente.\n'
-                'Quedas e quase quedas disparam alertas no Home.',
+                'Quedas e quase quedas podem disparar callbacks para a tela inicial.',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 12, color: Colors.grey.shade800),
               ),
@@ -289,5 +189,153 @@ class _SensorScreenState extends State<SensorScreen> {
         ),
       ),
     );
+  }
+
+  // ========= UI PARA RELÓGIO =========
+
+  Widget _buildWatchLayout(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final shortestSide = size.shortestSide;
+    final double scale = (shortestSide / 320).clamp(0.75, 1.0).toDouble();
+
+    final bgColor = Colors.black;
+    final textColor = Colors.white70;
+
+    return Scaffold(
+      backgroundColor: bgColor,
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: 10 * scale,
+              vertical: 8 * scale,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Status compacto
+                Container(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 8 * scale,
+                    vertical: 6 * scale,
+                  ),
+                  decoration: BoxDecoration(
+                    color: _statusColor.withOpacity(0.18),
+                    borderRadius: BorderRadius.circular(14 * scale),
+                  ),
+                  child: Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 18 * scale,
+                        backgroundColor: _statusColor.withOpacity(0.2),
+                        child: Icon(
+                          _lastMovement == MovementType.fall
+                              ? Icons.warning_amber_rounded
+                              : (_lastMovement == MovementType.nearFall
+                                    ? Icons.report_problem_rounded
+                                    : Icons.check_circle),
+                          color: _statusColor,
+                          size: 18 * scale,
+                        ),
+                      ),
+                      SizedBox(width: 8 * scale),
+                      Expanded(
+                        child: Text(
+                          _statusTexto,
+                          style: TextStyle(
+                            fontSize: 9 * scale,
+                            color: _statusColor,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                SizedBox(height: 10 * scale),
+
+                // Leituras resumidas
+                Container(
+                  padding: EdgeInsets.all(8 * scale),
+                  decoration: BoxDecoration(
+                    color: Colors.white10,
+                    borderRadius: BorderRadius.circular(12 * scale),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Accel: ${_accelTotal.toStringAsFixed(1)} m/s²',
+                        style: TextStyle(fontSize: 9 * scale, color: textColor),
+                      ),
+                      SizedBox(height: 3 * scale),
+                      Text(
+                        'Gyro: ${_gyroTotal.toStringAsFixed(1)} °/s',
+                        style: TextStyle(fontSize: 9 * scale, color: textColor),
+                      ),
+                      SizedBox(height: 6 * scale),
+                      Text(
+                        'Tela de debug dos sensores\n'
+                        'para testes no emulador.',
+                        style: TextStyle(
+                          fontSize: 8 * scale,
+                          color: textColor.withOpacity(0.8),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                SizedBox(height: 12 * scale),
+
+                // Botão de voltar
+                SizedBox(
+                  width: 110 * scale,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blueGrey.shade700,
+                      padding: EdgeInsets.symmetric(
+                        vertical: 6 * scale,
+                        horizontal: 8 * scale,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20 * scale),
+                      ),
+                    ),
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                    },
+                    child: Text(
+                      'Voltar',
+                      style: TextStyle(
+                        fontSize: 10 * scale,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ========= ROOT BUILD =========
+
+  @override
+  Widget build(BuildContext context) {
+    final shortestSide = MediaQuery.of(context).size.shortestSide;
+    final bool isWatch = shortestSide < 300;
+
+    if (isWatch) {
+      return _buildWatchLayout(context);
+    } else {
+      return _buildPhoneLayout(context);
+    }
   }
 }

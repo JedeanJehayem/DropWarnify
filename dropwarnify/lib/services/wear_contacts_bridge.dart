@@ -1,13 +1,26 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:dropwarnify/services/fall_history_repository.dart';
+import 'package:dropwarnify/models/fall_event.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+// EmergencyContact vem da Home (mesmo modelo usado lá)
 import '../screens/home/home_screen.dart' show EmergencyContact;
 
-/// Bridge para sincronizar contatos entre celular e relógio.
-/// No relógio, ele pede contatos para o celular via MethodChannel/Data Layer.
-/// No celular, esse canal pode simplesmente não estar implementado (e tudo bem).
+/// Bridge para sincronizar contatos e eventos entre celular e relógio.
+///
+/// No relógio:
+///   - pede contatos para o celular via MethodChannel/Data Layer;
+///   - envia evento de queda (SOS / auto-quedas) para o celular registrar no histórico
+///     e disparar os canais de alerta (SMS/Whats) do lado do telefone.
+///
+/// No celular:
+///   - pode implementar o canal para responder com os contatos
+///   - recebe eventos de queda vindos do relógio e:
+///       1) registra no histórico unificado
+///       2) emite no stream [watchEventsStream] para a Home reagir (enviar SMS/Whats)
 class WearContactsBridge {
   WearContactsBridge._() {
     // Registra o handler para receber callbacks do nativo
@@ -20,9 +33,20 @@ class WearContactsBridge {
     'br.com.dropwarnify/wear_contacts',
   );
 
+  /// Completer usado apenas durante a requisição de contatos (lado do relógio).
   Completer<List<EmergencyContact>?>? _pendingContactsRequest;
 
+  /// Stream de eventos de queda vindos do relógio (no CELULAR).
+  ///
+  /// Somente o app rodando no telefone deve se inscrever aqui
+  /// (por exemplo, a HomeScreen) para disparar as rotinas de alerta.
+  final StreamController<FallEvent> _watchEventsController =
+      StreamController<FallEvent>.broadcast();
+
+  Stream<FallEvent> get watchEventsStream => _watchEventsController.stream;
+
   /// Tenta buscar a lista de contatos do CELULAR.
+  ///
   /// No relógio:
   ///   - envia "requestContactsFromPhone" para o Kotlin
   ///   - aguarda "onContactsReceived" com um JSON de lista
@@ -54,15 +78,42 @@ class WearContactsBridge {
       // Canal não implementado (por ex., rodando no celular) -> sem problema
       _pendingContactsRequest = null;
       return null;
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('WearContactsBridge.getContactsFromPhone erro: $e\n$st');
       _pendingContactsRequest = null;
       return null;
     }
   }
 
+  /// Envia um evento de queda (FallEvent) do RELÓGIO para o CELULAR,
+  /// para que o telefone registre no histórico (SharedPreferences) e,
+  /// a partir daí, o app do CELULAR possa disparar SMS/Whats.
+  ///
+  /// No celular (ou se o canal não existir), isso simplesmente não faz nada.
+  Future<void> sendFallEventToPhone(FallEvent event) async {
+    try {
+      // garantindo origin = "watch" ao enviar
+      final map = event.toJson();
+      if (!map.containsKey('origin') || map['origin'] == 'desconhecido') {
+        map['origin'] = 'watch';
+      }
+
+      await _channel.invokeMethod<void>(
+        'send_fall_event_to_phone',
+        map, // enviado como Map<String, dynamic> para o nativo
+      );
+    } on MissingPluginException {
+      // Canal não existe (provavelmente rodando no celular) -> ignora
+    } catch (e, st) {
+      debugPrint('WearContactsBridge.sendFallEventToPhone erro: $e\n$st');
+      // qualquer erro aqui não deve quebrar o fluxo do SOS no relógio
+    }
+  }
+
   /// Handler chamado pelo código nativo (Kotlin) via MethodChannel.
-  /// Espera o método "onContactsReceived" com um JSON de lista de contatos:
-  /// [ { "name": "...", "phone": "..." }, ... ]
+  ///
+  /// - "onContactsReceived": JSON de lista de contatos
+  /// - "onFallEventFromWatch": JSON de um FallEvent vindo do relógio
   Future<dynamic> _handleNativeCallback(MethodCall call) async {
     if (call.method == 'onContactsReceived') {
       final jsonStr = call.arguments as String?;
@@ -84,11 +135,40 @@ class WearContactsBridge {
             .map((e) => EmergencyContact.fromJson(e as Map<String, dynamic>))
             .toList();
         _pendingContactsRequest!.complete(contatos);
-      } catch (_) {
+      } catch (e, st) {
+        debugPrint('WearContactsBridge.onContactsReceived erro: $e\n$st');
         _pendingContactsRequest!.complete(null);
       } finally {
         _pendingContactsRequest = null;
       }
+
+      return null;
+    }
+
+    if (call.method == 'onFallEventFromWatch') {
+      final jsonStr = call.arguments as String?;
+      if (jsonStr == null || jsonStr.trim().isEmpty) {
+        return null;
+      }
+
+      try {
+        final map = jsonDecode(jsonStr) as Map<String, dynamic>;
+
+        // reforça origin = "watch" (caso venha sem ou errado)
+        map['origin'] = 'watch';
+
+        final event = FallEvent.fromJson(map);
+
+        // grava no histórico local do CELULAR
+        await FallHistoryRepository.instance.registrarEvento(event);
+
+        // notifica listeners (por exemplo, HomeScreen no CELULAR)
+        _watchEventsController.add(event);
+      } catch (e, st) {
+        debugPrint('WearContactsBridge.onFallEventFromWatch erro: $e\n$st');
+      }
+
+      return null;
     }
 
     return null;

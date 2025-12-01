@@ -1,11 +1,16 @@
 import 'dart:convert';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:dropwarnify/services/fall_history_repository.dart';
+import 'package:dropwarnify/services/wear_sensor_monitor.dart'; // ⬅️ PLUG DOS SENSORES
 
+import 'package:dropwarnify/models/fall_event.dart';
 import '../../services/wear_contacts_bridge.dart';
 import '../history/history_screen.dart';
 import '../settings/settings_screen.dart';
@@ -27,39 +32,6 @@ class EmergencyContact {
   }
 
   Map<String, dynamic> toJson() => {'name': name, 'phone': phone};
-}
-
-/// Evento de queda (para histórico)
-class FallEvent {
-  final DateTime timestamp;
-  final bool simulated;
-  final bool nearFall; // se é QUASE QUEDA
-  final List<String> destinos; // ex: ["Lolo (SMS)", "Ana (WhatsApp)"]
-
-  FallEvent({
-    required this.timestamp,
-    required this.simulated,
-    required this.nearFall,
-    required this.destinos,
-  });
-
-  Map<String, dynamic> toJson() => {
-    'timestamp': timestamp.toIso8601String(),
-    'simulated': simulated,
-    'nearFall': nearFall,
-    'destinos': destinos,
-  };
-
-  factory FallEvent.fromJson(Map<String, dynamic> json) {
-    return FallEvent(
-      timestamp: DateTime.parse(json['timestamp'] as String),
-      simulated: json['simulated'] as bool? ?? false,
-      nearFall: json['nearFall'] as bool? ?? false,
-      destinos: (json['destinos'] as List<dynamic>? ?? [])
-          .map((e) => e.toString())
-          .toList(),
-    );
-  }
 }
 
 /// Tipo de status atual mostrado no card principal
@@ -92,15 +64,56 @@ class _HomeScreenState extends State<HomeScreen> {
   /// indica se o relógio está na tela de "enviando alerta"
   bool _isSendingFromWatch = false;
 
+  /// Monitor de sensores no relógio
+  WearSensorMonitor? _sensorMonitor;
+
+  /// Inscrição de eventos de queda vindos do relógio (no CELULAR)
+  StreamSubscription<FallEvent>? _watchEventsSub;
+
+  /// Canal para controlar o serviço nativo de detecção contínua no relógio
+  static const MethodChannel _wearServiceChannel = MethodChannel(
+    'br.com.dropwarnify/wear_service',
+  );
+
   @override
   void initState() {
     super.initState();
     _carregarResumoContato();
 
+    // ouvir eventos de queda vindos do relógio (no CELULAR)
+    _watchEventsSub = WearContactsBridge.instance.watchEventsStream.listen((
+      event,
+    ) {
+      _handleFallEventFromWatch(event);
+    });
+
     // depois que a árvore montar, verificamos se é relógio
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _tentarSincronizarContatosDoCelularSeWatch();
+      _iniciarSensoresNoRelogioSeNecessario(); // debug em Dart
+      _ativarMonitoramentoContinuoNoRelogio(); // serviço nativo em foreground
     });
+  }
+
+  @override
+  void dispose() {
+    _watchEventsSub?.cancel();
+    _sensorMonitor?.dispose();
+    super.dispose();
+  }
+
+  /// Liga o serviço nativo de detecção contínua de quedas **apenas no relógio**.
+  Future<void> _ativarMonitoramentoContinuoNoRelogio() async {
+    final shortestSide = MediaQuery.of(context).size.shortestSide;
+    final bool isWatch = shortestSide < 300;
+    if (!isWatch) return;
+
+    try {
+      await _wearServiceChannel.invokeMethod('start_fall_service');
+      debugPrint('WATCH: serviço de detecção contínua iniciado.');
+    } catch (e, st) {
+      debugPrint('WATCH: erro ao iniciar serviço de quedas: $e\n$st');
+    }
   }
 
   // ========= HELPERS TELEFONE =========
@@ -131,6 +144,14 @@ class _HomeScreenState extends State<HomeScreen> {
     final normalized = '55$digits';
     final encodedMsg = Uri.encodeComponent(message);
     return Uri.parse('https://wa.me/$normalized?text=$encodedMsg');
+  }
+
+  /// Trata evento de queda vindo do relógio (recebido no CELULAR)
+  Future<void> _handleFallEventFromWatch(FallEvent event) async {
+    await _enviarAlertaComConfigsSalvas(
+      simulado: false,
+      nearFall: event.nearFall,
+    );
   }
 
   // ========= LOCALIZAÇÃO PARA ALERTA (ENDEREÇO) =========
@@ -188,7 +209,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ========= CARREGA RESUMO DAS CONFIGS =========
+  // ========= CARREGA RESUMO DAS CONFIGS / SYNC WEAR =========
 
   Future<void> _tentarSincronizarContatosDoCelularSeWatch() async {
     final shortestSide = MediaQuery.of(context).size.shortestSide;
@@ -196,53 +217,41 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (!isWatch) return;
 
-    print('WATCH: pedindo contatos ao celular...');
-    final lista = await WearContactsBridge.instance.getContactsFromPhone();
-    print('WATCH: resposta = ${lista?.length ?? -1} contatos (null = -1)');
+    try {
+      debugPrint('WATCH: pedindo contatos ao celular...');
+      final lista = await WearContactsBridge.instance.getContactsFromPhone();
+      debugPrint('WATCH: resposta = ${lista?.length ?? -1} contatos');
 
-    if (!mounted) return;
+      if (!mounted) return;
 
-    if (lista == null) {
-      // não conseguiu falar com o nativo / celular
+      if (lista == null || lista.isEmpty) {
+        // Falha de comunicação ou celular respondeu vazio.
+        // Fica silencioso para não encher o usuário de erro à toa.
+        return;
+      }
+
+      // Salvar contatos recebidos também no relógio
+      final prefs = await SharedPreferences.getInstance();
+      final listStr = lista.map((c) => jsonEncode(c.toJson())).toList();
+      await prefs.setStringList('emergency_contacts', listStr);
+
+      // Recarrega resumo (contatos + flags) a partir do armazenamento local
+      await _carregarResumoContato();
+
+      // Snack de sucesso (esse pode aparecer)
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          duration: Duration(seconds: 3),
+        SnackBar(
+          duration: const Duration(seconds: 2),
           content: Text(
-            'Não foi possível sincronizar contatos com o celular.',
+            'Sincronizados ${lista.length} contato(s) do celular.',
             textAlign: TextAlign.center,
           ),
         ),
       );
-      return;
+    } catch (e, st) {
+      debugPrint('WATCH: erro ao sincronizar contatos: $e\n$st');
+      // Não mostra snackbar de erro aqui para não assustar logo na abertura.
     }
-
-    if (lista.isEmpty) {
-      // falou com o celular mas ele devolveu 0
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          duration: Duration(seconds: 3),
-          content: Text(
-            'Nenhum contato recebido do celular.',
-            textAlign: TextAlign.center,
-          ),
-        ),
-      );
-      return;
-    }
-
-    setState(() {
-      _contacts = lista;
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        duration: const Duration(seconds: 2),
-        content: Text(
-          'Sincronizados ${lista.length} contato(s) do celular.',
-          textAlign: TextAlign.center,
-        ),
-      ),
-    );
   }
 
   Future<void> _carregarResumoContato() async {
@@ -471,145 +480,283 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ========= ENVIO DO ALERTA =========
-  /// Agora retorna bool para indicar se realmente enviou algum alerta.
-  Future<bool> _enviarAlertaComConfigsSalvas({
-    required bool simulado,
-    bool nearFall = false, // se é QUASE QUEDA
-  }) async {
-    final prefs = await SharedPreferences.getInstance();
 
-    final nomeIdoso = prefs.getString('nome_idoso') ?? 'Paciente';
-    final enviarSMS = prefs.getBool('enviar_sms') ?? false;
-    final enviarWhatsApp = prefs.getBool('enviar_whatsapp') ?? false;
-
-    final contatosValidos = _contacts
-        .where((c) => c.phone.isNotEmpty && _isValidPhone(c.phone))
-        .toList();
-
-    if (contatosValidos.isEmpty) {
-      if (!mounted) return false;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          margin: const EdgeInsets.only(bottom: 20, left: 20, right: 20),
-          content: Center(
-            child: Text(
-              'Nenhum contato válido cadastrado.',
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 11),
-            ),
-          ),
-          duration: const Duration(seconds: 3),
-        ),
-      );
-      return false;
-    }
-
-    if (!enviarSMS && !enviarWhatsApp) {
-      if (!mounted) return false;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Ative SMS ou WhatsApp na tela de Configurações para enviar o alerta.',
-          ),
-        ),
-      );
-      return false;
-    }
-
-    final msgBase = simulado
-        ? 'ALERTA DE TESTE do DropWarnify. Possível queda envolvendo $nomeIdoso.'
-        : (nearFall
-              ? 'ALERTA PREVENTIVO do DropWarnify. Possível QUASE queda envolvendo $nomeIdoso.'
-              : 'ALERTA REAL do DropWarnify. Possível queda envolvendo $nomeIdoso.');
-
-    final locationSnippet = await _buildLocationSnippetForAlert();
-    final mensagemFinal = locationSnippet == null
-        ? msgBase
-        : '$msgBase\n\n$locationSnippet';
-
-    final enviados = <String>[];
-
-    for (final c in contatosValidos) {
-      final nome = c.name.isNotEmpty ? c.name : 'Contato';
-      final telefone = c.phone;
-
-      if (enviarSMS) {
-        final smsUri = _buildSmsUri(telefone, mensagemFinal);
-        if (await canLaunchUrl(smsUri)) {
-          await launchUrl(smsUri, mode: LaunchMode.externalApplication);
-          enviados.add('$nome (SMS)');
-        }
-        await Future.delayed(const Duration(seconds: 1));
-      }
-
-      if (enviarWhatsApp) {
-        final waUri = _buildWhatsAppUri(telefone, mensagemFinal);
-        if (await canLaunchUrl(waUri)) {
-          await launchUrl(waUri, mode: LaunchMode.externalApplication);
-          enviados.add('$nome (WhatsApp)');
-        }
-        await Future.delayed(const Duration(seconds: 1));
-      }
-    }
-
-    if (enviados.isEmpty) {
-      // Nenhum canal conseguiu ser aberto de fato.
-      if (!mounted) return false;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Não foi possível abrir SMS/WhatsApp para enviar o alerta.',
-          ),
-        ),
-      );
-      return false;
-    }
-
-    await _registrarEventoQueda(
-      simulado: simulado,
-      nearFall: nearFall,
-      destinos: enviados,
-    );
-
-    if (!mounted) return true;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        duration: const Duration(seconds: 4),
-        content: Text(
-          'Alertas enviados para:\n${enviados.join(", ")}\n'
-          'No WhatsApp Web, apenas o último chat pode ficar visível, mas todos foram disparados.',
-        ),
-      ),
-    );
-
-    return true;
-  }
-
-  /// Registra um evento de queda no histórico (SharedPreferences)
+  /// Registra um evento de queda no histórico usando o repositório central
   Future<void> _registrarEventoQueda({
     required bool simulado,
     required bool nearFall,
     required List<String> destinos,
+    required String origin,
+    required String statusEnvio,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
-    final list = prefs.getStringList('fall_events') ?? [];
-
     final event = FallEvent(
       timestamp: DateTime.now(),
       simulated: simulado,
       nearFall: nearFall,
       destinos: destinos,
+      origin: origin,
+      statusEnvio: statusEnvio,
     );
 
-    list.add(jsonEncode(event.toJson()));
-    await prefs.setStringList('fall_events', list);
+    await FallHistoryRepository.instance.registrarEvento(event);
+  }
+
+  /// Agora retorna bool para indicar se realmente enviou algum alerta.
+  Future<bool> _enviarAlertaComConfigsSalvas({
+    required bool simulado,
+    bool nearFall = false, // se é QUASE QUEDA
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      final nomeIdoso = prefs.getString('nome_idoso') ?? 'Paciente';
+      final enviarSMS = prefs.getBool('enviar_sms') ?? false;
+      final enviarWhatsApp = prefs.getBool('enviar_whatsapp') ?? false;
+
+      // Descobre se é relógio
+      final shortestSide = MediaQuery.of(context).size.shortestSide;
+      final bool isWatch = shortestSide < 300;
+
+      // No relógio, se as flags não existirem (false/false), não vamos bloquear:
+      bool smsAtivo = enviarSMS;
+      bool whatsAtivo = enviarWhatsApp;
+      if (isWatch && !smsAtivo && !whatsAtivo) {
+        smsAtivo = true;
+        whatsAtivo = true;
+      }
+
+      final contatosValidos = _contacts
+          .where((c) => c.phone.isNotEmpty && _isValidPhone(c.phone))
+          .toList();
+
+      if (contatosValidos.isEmpty) {
+        if (!mounted) return false;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            behavior: SnackBarBehavior.floating,
+            content: Center(
+              child: Text(
+                'Nenhum contato válido cadastrado.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 11),
+              ),
+            ),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        return false;
+      }
+
+      if (!smsAtivo && !whatsAtivo) {
+        if (!mounted) return false;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Ative SMS ou WhatsApp na tela de Configurações para enviar o alerta.',
+            ),
+          ),
+        );
+        return false;
+      }
+
+      final msgBase = simulado
+          ? 'ALERTA DE TESTE do DropWarnify. Possível queda envolvendo $nomeIdoso.'
+          : (nearFall
+                ? 'ALERTA PREVENTIVO do DropWarnify. Possível QUASE queda envolvendo $nomeIdoso.'
+                : 'ALERTA REAL do DropWarnify. Possível queda envolvendo $nomeIdoso.');
+
+      final locationSnippet = await _buildLocationSnippetForAlert();
+      final mensagemFinal = locationSnippet == null
+          ? msgBase
+          : '$msgBase\n\n$locationSnippet';
+
+      final enviados = <String>[];
+      bool algumAppDisponivel = false;
+
+      for (final c in contatosValidos) {
+        final nome = c.name.isNotEmpty ? c.name : 'Contato';
+        final telefone = c.phone;
+
+        if (smsAtivo) {
+          enviados.add('$nome (SMS)');
+          final smsUri = _buildSmsUri(telefone, mensagemFinal);
+          try {
+            if (await canLaunchUrl(smsUri)) {
+              algumAppDisponivel = true;
+              await launchUrl(smsUri, mode: LaunchMode.externalApplication);
+            } else {
+              debugPrint('Nenhum app de SMS disponível para $telefone');
+            }
+          } catch (e) {
+            debugPrint('Erro ao abrir SMS: $e');
+          }
+          await Future.delayed(const Duration(seconds: 1));
+        }
+
+        if (whatsAtivo) {
+          enviados.add('$nome (WhatsApp)');
+          final waUri = _buildWhatsAppUri(telefone, mensagemFinal);
+          try {
+            if (await canLaunchUrl(waUri)) {
+              algumAppDisponivel = true;
+              await launchUrl(waUri, mode: LaunchMode.externalApplication);
+            } else {
+              debugPrint('Nenhum app de WhatsApp disponível para $telefone');
+            }
+          } catch (e) {
+            debugPrint('Erro ao abrir WhatsApp: $e');
+          }
+          await Future.delayed(const Duration(seconds: 1));
+        }
+      }
+
+      // Mesmo que o emulador não tenha apps, se tinha contato + canal,
+      // vamos registrar o evento no histórico.
+      final destinosParaLog = enviados.isEmpty
+          ? contatosValidos
+                .map(
+                  (c) =>
+                      (c.name.isNotEmpty ? c.name : 'Contato') +
+                      ' (sem app de SMS/WhatsApp disponível)',
+                )
+                .toList()
+          : List<String>.from(enviados);
+
+      // origem: phone ou watch
+      final origin = isWatch ? 'watch' : 'phone';
+
+      // status de envio: tenta qualificar o que aconteceu
+      String statusEnvio;
+      if (algumAppDisponivel) {
+        statusEnvio = 'ok';
+      } else if (contatosValidos.isNotEmpty && (smsAtivo || whatsAtivo)) {
+        // havia contato + canal, mas nenhum app disponível (caso típico em emulador)
+        statusEnvio = 'falha';
+      } else {
+        statusEnvio = 'desconhecido';
+      }
+
+      await _registrarEventoQueda(
+        simulado: simulado,
+        nearFall: nearFall,
+        destinos: destinosParaLog,
+        origin: origin,
+        statusEnvio: statusEnvio,
+      );
+
+      if (!mounted) return true;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 4),
+          content: Text(
+            'Rotinas de alerta executadas para:\n'
+            '${(enviados.isEmpty ? ['(sem app de SMS/WhatsApp disponível)'] : enviados).join(", ")}',
+          ),
+        ),
+      );
+
+      return true;
+    } catch (e, st) {
+      debugPrint('Erro inesperado ao enviar alerta: $e\n$st');
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Erro inesperado ao enviar alerta.')),
+      );
+      return false;
+    }
   }
 
   // ========= AÇÕES =========
 
+  /// Inicializa o monitor de sensores **apenas no relógio**.
+  void _iniciarSensoresNoRelogioSeNecessario() {
+    final shortestSide = MediaQuery.of(context).size.shortestSide;
+    final bool isWatch = shortestSide < 300;
+    if (!isWatch) return;
+    if (_sensorMonitor != null) return;
+
+    _sensorMonitor = WearSensorMonitor(
+      onFall: () async {
+        await _handleWatchAutoFall(nearFall: false);
+      },
+      onNearFall: () async {
+        await _handleWatchAutoFall(nearFall: true);
+      },
+    );
+    _sensorMonitor!.start();
+  }
+
+  /// Tratamento de QUEDA/QUASE QUEDA detectada automaticamente no relógio
+  Future<void> _handleWatchAutoFall({required bool nearFall}) async {
+    if (!mounted) return;
+
+    // Atualiza o status visual
+    setState(() {
+      if (nearFall) {
+        _statusTitulo = 'Quase queda detectada (sensores)';
+        _statusDescricao =
+            'O relógio detectou um desequilíbrio forte. Os contatos podem ser avisados preventivamente.';
+        _statusColor = Colors.orange.shade600;
+        _statusType = StatusAlertType.nearFall;
+      } else {
+        _statusTitulo = 'Queda detectada pelo relógio!';
+        _statusDescricao =
+            'Os sensores identificaram uma possível queda real. As rotinas de alerta serão disparadas.';
+        _statusColor = Colors.red.shade700;
+        _statusType = StatusAlertType.fallReal;
+      }
+      _pulse = true;
+    });
+
+    Future.delayed(const Duration(milliseconds: 150), () {
+      if (!mounted) return;
+      setState(() => _pulse = false);
+    });
+
+    // Garante que temos contatos sincronizados (se ainda estiver vazio)
+    if (_contacts.isEmpty) {
+      await _tentarSincronizarContatosDoCelularSeWatch();
+      await _carregarResumoContato();
+    }
+
+    // 👉 Novo fluxo: só monta o evento e envia para o CELULAR
+    try {
+      final destinos = _contacts
+          .where((c) => c.phone.isNotEmpty && _isValidPhone(c.phone))
+          .map((c) {
+            final nome = c.name.isNotEmpty ? c.name : 'Contato';
+            return nearFall
+                ? '$nome (quase queda automática relógio)'
+                : '$nome (queda automática relógio)';
+          })
+          .toList();
+
+      final evento = FallEvent(
+        timestamp: DateTime.now(),
+        simulated: false,
+        nearFall: nearFall,
+        destinos: destinos,
+        origin: 'watch',
+        statusEnvio: 'desconhecido',
+      );
+
+      await WearContactsBridge.instance.sendFallEventToPhone(evento);
+    } catch (_) {
+      // falha aqui não deve quebrar a experiência no relógio
+    }
+  }
+
   Future<void> _abrirSensorScreen() async {
+    // Se for relógio, podemos pausar o monitor da Home enquanto estamos no debug
+    final shortestSide = MediaQuery.of(context).size.shortestSide;
+    final bool isWatch = shortestSide < 300;
+
+    if (isWatch) {
+      _sensorMonitor?.dispose();
+      _sensorMonitor = null;
+    }
+
     await Navigator.push(
       context,
       MaterialPageRoute(
@@ -657,6 +804,11 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ),
     );
+
+    // Ao voltar, se for relógio, reativa o monitor da Home
+    if (isWatch && mounted) {
+      _iniciarSensoresNoRelogioSeNecessario();
+    }
   }
 
   Future<void> _simularQueda() async {
@@ -696,40 +848,80 @@ class _HomeScreenState extends State<HomeScreen> {
   /// Mostra uma tela de "enviando notificação" no smartwatch
   /// e depois volta para a tela normal.
   Future<void> _enviarAlertaManualFromWatch() async {
-    setState(() {
-      _isSendingFromWatch = true;
-    });
+    try {
+      // Se o relógio ainda não tem contatos em memória, tenta sincronizar agora
+      if (_contacts.isEmpty) {
+        await _tentarSincronizarContatosDoCelularSeWatch();
+        // Recarrega contatos do storage, se a sync tiver salvo algo
+        await _carregarResumoContato();
+      }
 
-    final sucesso = await _enviarAlertaComConfigsSalvas(
-      simulado: false,
-      nearFall: false,
-    );
-
-    if (!mounted) return;
-
-    if (sucesso) {
       setState(() {
-        _statusTitulo = 'Alerta manual enviado';
-        _statusDescricao =
-            'Você acionou manualmente o alerta pelo relógio. Os contatos foram avisados.';
-        _statusColor = Colors.red.shade700;
-        _pulse = true;
-        _statusType = StatusAlertType.fallReal;
+        _isSendingFromWatch = true;
       });
 
-      Future.delayed(const Duration(milliseconds: 150), () {
+      final sucesso = await _enviarAlertaComConfigsSalvas(
+        simulado: false,
+        nearFall: false,
+      );
+
+      if (!mounted) return;
+
+      if (sucesso) {
+        setState(() {
+          _statusTitulo = 'Alerta manual enviado';
+          _statusDescricao =
+              'Você acionou manualmente o alerta pelo relógio. Os contatos foram avisados.';
+          _statusColor = Colors.red.shade700;
+          _pulse = true;
+          _statusType = StatusAlertType.fallReal;
+        });
+
+        Future.delayed(const Duration(milliseconds: 150), () {
+          if (!mounted) return;
+          setState(() => _pulse = false);
+        });
+
+        // ➕ continua mandando o evento para o celular (fluxo Wear → Phone)
+        try {
+          final destinos = _contacts
+              .where((c) => c.phone.isNotEmpty && _isValidPhone(c.phone))
+              .map((c) {
+                final nome = c.name.isNotEmpty ? c.name : 'Contato';
+                return '$nome (SOS relógio)';
+              })
+              .toList();
+
+          final evento = FallEvent(
+            timestamp: DateTime.now(),
+            simulated: false,
+            nearFall: false,
+            destinos: destinos,
+            origin: 'watch',
+            statusEnvio: 'desconhecido',
+          );
+
+          await WearContactsBridge.instance.sendFallEventToPhone(evento);
+        } catch (_) {
+          // se der erro, não quebra a UX do SOS
+        }
+      }
+    } catch (e, st) {
+      debugPrint('Erro no fluxo SOS do relógio: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Erro ao processar SOS no relógio.')),
+        );
+      }
+    } finally {
+      // Aguarda alguns segundos e volta para a tela normal do relógio
+      Future.delayed(const Duration(seconds: 3), () {
         if (!mounted) return;
-        setState(() => _pulse = false);
+        setState(() {
+          _isSendingFromWatch = false;
+        });
       });
     }
-
-    // Aguarda alguns segundos e volta para a tela normal do relógio
-    Future.delayed(const Duration(seconds: 3), () {
-      if (!mounted) return;
-      setState(() {
-        _isSendingFromWatch = false;
-      });
-    });
   }
 
   // ========= STATUS CARD (reutilizado: phone + watch) =========
@@ -1042,7 +1234,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     children: [
                       if (_isSendingFromWatch) ...[
                         SizedBox(height: 8 * scale),
-                        // IMAGEM DE ENVIO DE NOTIFICAÇÃO
                         Container(
                           width: 110 * scale,
                           height: 110 * scale,
@@ -1055,12 +1246,10 @@ class _HomeScreenState extends State<HomeScreen> {
                             child: Image.asset(
                               'assets/images/sending_alert.png',
                               fit: BoxFit.contain,
-                              color: Colors
-                                  .white, // opcional: deixa a imagem branca
+                              color: Colors.white,
                             ),
                           ),
                         ),
-
                         SizedBox(height: 10 * scale),
                         const CircularProgressIndicator(strokeWidth: 3),
                         SizedBox(height: 10 * scale),
@@ -1083,14 +1272,56 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                         ),
                       ] else ...[
-                        Transform.scale(
-                          scale: scale * 0.9,
-                          child: _buildStatusCard(
-                            compact: true,
-                            dark: _watchDarkMode,
+                        if (_statusType != StatusAlertType.none) ...[
+                          Container(
+                            padding: EdgeInsets.symmetric(
+                              horizontal: 8 * scale,
+                              vertical: 6 * scale,
+                            ),
+                            decoration: BoxDecoration(
+                              color: _statusColor.withOpacity(0.18),
+                              borderRadius: BorderRadius.circular(14 * scale),
+                            ),
+                            child: Column(
+                              children: [
+                                Text(
+                                  _statusType == StatusAlertType.fallReal
+                                      ? 'SOS enviado'
+                                      : _statusType ==
+                                            StatusAlertType.fallSimulated
+                                      ? 'Queda simulada'
+                                      : 'Quase queda detectada',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 11 * scale,
+                                    fontWeight: FontWeight.bold,
+                                    color: _statusColor,
+                                  ),
+                                ),
+                                SizedBox(height: 3 * scale),
+                                Text(
+                                  _statusDescricao,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 9 * scale,
+                                    color: textColor,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                        SizedBox(height: 10 * scale),
+                          SizedBox(height: 10 * scale),
+                        ] else ...[
+                          Text(
+                            "Monitorando quedas...",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 10 * scale,
+                              color: textColor,
+                            ),
+                          ),
+                          SizedBox(height: 8 * scale),
+                        ],
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -1128,9 +1359,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             SizedBox(width: 12 * scale),
                             GestureDetector(
                               onTap: () {
-                                setState(
-                                  () => _watchDarkMode = !_watchDarkMode,
-                                );
+                                setState(() {
+                                  _watchDarkMode = !_watchDarkMode;
+                                });
                               },
                               child: Container(
                                 width: 48 * scale,
@@ -1165,6 +1396,46 @@ class _HomeScreenState extends State<HomeScreen> {
                           style: TextStyle(
                             fontSize: 10 * scale,
                             color: textColor,
+                          ),
+                        ),
+                        SizedBox(height: 4 * scale),
+
+                        // 🔧 Botão temporário de debug para abrir a tela de sensores
+                        Container(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 10 * scale,
+                            vertical: 6 * scale,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.amber.shade600,
+                            borderRadius: BorderRadius.circular(10 * scale),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.25),
+                                blurRadius: 4 * scale,
+                                offset: Offset(0, 2 * scale),
+                              ),
+                            ],
+                          ),
+                          child: TextButton(
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => const SensorScreen(),
+                                ),
+                              );
+                            },
+                            child: Text(
+                              "DEBUG SENSORES",
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 9 * scale,
+                                fontWeight: FontWeight.w800,
+                                color: Colors.black,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
                           ),
                         ),
                       ],

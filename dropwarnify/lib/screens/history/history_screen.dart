@@ -2,41 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
-/// Mesmo modelo usado no HomeScreen para registrar eventos de queda
-class FallEvent {
-  final DateTime timestamp;
-  final bool simulated;
-  final bool nearFall; // se é QUASE QUEDA
-  final List<String> destinos; // ex: ["Lolo (SMS)", "Ana (WhatsApp)"]
-
-  FallEvent({
-    required this.timestamp,
-    required this.simulated,
-    required this.nearFall,
-    required this.destinos,
-  });
-
-  Map<String, dynamic> toJson() => {
-    'timestamp': timestamp.toIso8601String(),
-    'simulated': simulated,
-    'nearFall': nearFall,
-    'destinos': destinos,
-  };
-
-  factory FallEvent.fromJson(Map<String, dynamic> json) {
-    return FallEvent(
-      timestamp: DateTime.parse(json['timestamp'] as String),
-      simulated: json['simulated'] as bool? ?? false,
-      nearFall:
-          json['nearFall'] as bool? ??
-          false, // eventos antigos (sem nearFall) viram false
-      destinos: (json['destinos'] as List<dynamic>? ?? [])
-          .map((e) => e.toString())
-          .toList(),
-    );
-  }
-}
+import 'package:dropwarnify/models/fall_event.dart';
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
@@ -48,6 +14,9 @@ class HistoryScreen extends StatefulWidget {
 class _HistoryScreenState extends State<HistoryScreen> {
   List<FallEvent> _events = [];
   bool _loading = true;
+
+  static const _fallEventsKeyRaw = 'flutter.fall_events';
+  static const _fallEventsPrefix = 'This is the prefix for a list.';
 
   @override
   void initState() {
@@ -61,7 +30,23 @@ class _HistoryScreenState extends State<HistoryScreen> {
     });
 
     final prefs = await SharedPreferences.getInstance();
-    final list = prefs.getStringList('fall_events') ?? [];
+
+    // Lê SOMENTE o valor bruto salvo pelo serviço nativo (ou por nós)
+    final raw = prefs.getString(_fallEventsKeyRaw);
+
+    List<String> list = <String>[];
+
+    if (raw != null && raw.startsWith(_fallEventsPrefix)) {
+      final arrStr = raw.substring(_fallEventsPrefix.length);
+      try {
+        final decoded = jsonDecode(arrStr);
+        if (decoded is List) {
+          list = decoded.map((e) => e.toString()).toList();
+        }
+      } catch (_) {
+        list = <String>[];
+      }
+    }
 
     final List<FallEvent> loaded = [];
     for (final s in list) {
@@ -108,6 +93,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
     if (confirm != true) return;
 
     final prefs = await SharedPreferences.getInstance();
+    // Remove a chave bruta
+    await prefs.remove(_fallEventsKeyRaw);
+    // Garanta que qualquer resquício antigo seja apagado
     await prefs.remove('fall_events');
 
     setState(() {
@@ -130,6 +118,43 @@ class _HistoryScreenState extends State<HistoryScreen> {
     final hora = _twoDigits(local.hour);
     final min = _twoDigits(local.minute);
     return '$dia/$mes/$ano às $hora:$min';
+  }
+
+  String _originLabel(FallEvent e) {
+    switch (e.origin) {
+      case 'watch':
+        return 'Relógio';
+      case 'phone':
+        return 'Celular';
+      default:
+        return 'Não informado';
+    }
+  }
+
+  Color _statusColor(FallEvent e) {
+    switch (e.statusEnvio) {
+      case 'ok':
+        return Colors.green.shade700;
+      case 'offline':
+        return Colors.orange.shade700;
+      case 'falha':
+        return Colors.red.shade700;
+      default:
+        return Colors.grey.shade700;
+    }
+  }
+
+  String _statusLabel(FallEvent e) {
+    switch (e.statusEnvio) {
+      case 'ok':
+        return 'Avisos enviados com sucesso';
+      case 'offline':
+        return 'Registrado sem conexão';
+      case 'falha':
+        return 'Falha ao enviar avisos';
+      default:
+        return 'Status de envio não informado';
+    }
   }
 
   @override
@@ -201,6 +226,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     ? 'Nenhum destino registrado.'
                     : e.destinos.join(', ');
 
+                final origemText = _originLabel(e);
+                final statusText = _statusLabel(e);
+                final statusColor = _statusColor(e);
+
                 return Card(
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(14),
@@ -228,6 +257,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          // data/hora
                           Text(
                             _formatDateTime(e.timestamp),
                             style: TextStyle(
@@ -236,6 +266,47 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             ),
                           ),
                           const SizedBox(height: 4),
+
+                          // origem + status em linha
+                          Row(
+                            children: [
+                              Icon(
+                                e.origin == 'watch'
+                                    ? Icons.watch
+                                    : Icons.phone_iphone,
+                                size: 14,
+                                color: Colors.grey.shade700,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                'Origem: $origemText',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade800,
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              Icon(
+                                Icons.outgoing_mail,
+                                size: 14,
+                                color: statusColor,
+                              ),
+                              const SizedBox(width: 4),
+                              Expanded(
+                                child: Text(
+                                  statusText,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: statusColor,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(height: 6),
                           Text(
                             'Enviado para:',
                             style: TextStyle(

@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
 import 'package:dropwarnify/screens/home/home_screen.dart';
+import 'package:dropwarnify/services/wear_contacts_bridge.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 🔵 inicializa o bridge para registrar o MethodCallHandler
+  WearContactsBridge.instance;
 
   // 🔵 Permite que o app ocupe toda a tela (incluindo área da câmera/notch)
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -28,10 +33,7 @@ class DropWarnifyApp extends StatelessWidget {
     return MaterialApp(
       title: 'DropWarnify',
       debugShowCheckedModeBanner: false,
-
-      // Mantém o seu tema normal
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.blue),
-
       home: const HomeScreen(),
     );
   }

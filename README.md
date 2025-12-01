@@ -10,159 +10,178 @@ DropWarnify é um sistema completo de detecção e alerta de quedas integrado en
 
 monitorar sensores internos (acelerômetro / giroscópio)
 
-detectar quedas, quase quedas e movimentos bruscos
+detectar quedas e quase quedas
 
 enviar alertas automáticos (SMS/WhatsApp)
 
-enviar localização aproximada
+compartilhar localização aproximada
 
 permitir acionamento manual via SOS no relógio
 
-sincronizar contatos do celular → relógio
+sincronizar contatos do celular para o relógio
 
-Hoje o projeto ganhou grandes módulos novos, incluindo um serviço nativo no relógio que mantém sensores ativos continuamente.
+Hoje o projeto evoluiu com monitoramento contínuo de sensores no Wear OS, reorganização da arquitetura e início da preparação para integração com o Mobile-Hub2 + ContextNet.
 
 🆕 Atualizações de Hoje (01/12/2025)
-🔥 1. Implementação do serviço nativo de sensores (Wear OS)
+🔥 1. Novo serviço nativo de sensores (Wear OS)
 
-Criamos o arquivo:
+Criado:
 
 android/app/src/main/kotlin/.../FallDetectionService.kt
 
 
-Esse serviço:
+Funções principais:
 
-roda em Foreground (não é finalizado pelo Wear OS)
+Roda em Foreground Service
 
-recebe sensores do relógio via Kotlin
+Mantém sensores ativos mesmo com o app fechado
 
-envia dados para Flutter via MethodChannel
+Coleta sensores acelerômetro/giroscópio
 
-está preparado para transmitir amostras para o celular
+Envia eventos para Flutter via MethodChannel
 
-Também adicionamos as permissões:
+Preparado para transmissão ao celular e backend
+
+Permissões adicionadas:
 
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
-📡 2. Novo módulo WearSensorMonitor (Flutter)
+📡 2. Novo WearSensorMonitor (Flutter)
 
 Criado:
 
 lib/services/wear_sensor_monitor.dart
 
 
-Ele:
+Faz leitura em tempo real dos sensores enviados pelo serviço nativo
 
-recebe dados em tempo real do serviço nativo
+Detecta padrões de queda
 
-detecta quedas simples diretamente no relógio
+Pode rodar enquanto a UI está fechada
 
-mantém análise mesmo com o app fechado
-
-🔗 3. Nova ponte Wear → Phone (fall_service_bridge.dart)
+🔗 3. Nova ponte Wear → Phone (fall_service_bridge)
 
 Criado:
 
 lib/wear/fall_service_bridge.dart
 
 
-Ele vai:
+Enviará eventos de SOS
 
-enviar sinais de SOS
+Transmitirá amostras do acelerômetro no futuro
 
-sincronizar estado do sensor
+Preparado para integração com Mobile-Hub2 (MR-UDP / MQTT)
 
-transmitir eventos futuramente para o ContextNet (Mobile-Hub2)
-
-🗃 4. Novo repositório de histórico centralizado
-
-Criado:
-
+🗃 4. Novo módulo central de histórico
 lib/services/fall_history_repository.dart
 
 
-Agora o histórico não depende mais apenas da UI.
+Agora o histórico:
 
-🧹 5. Limpeza e reestruturação
+não depende mais da UI
 
-Removido sensor_service.dart (obsoleto)
+é centralizado
 
-Ajustado home_screen.dart para usar monitoramento real
+será utilizado por relógio + celular
 
-Ajustado history_screen.dart
+🧹 5. Limpeza e reestruturação geral
 
-Ajustado wear_contacts_bridge.dart
+Removido sensor_service.dart
 
-Atualizado pubspec.yaml
+Criado wear_sensor_monitor.dart
 
-Corrigido MainActivity.kt e PhoneWearContactsService.kt
+Criado fall_service_bridge.dart
 
-Criado ícone temporário flutter_02.png
+Atualizado home_screen.dart, sensor_screen.dart, history_screen.dart
 
-Removido teste placeholder default do Flutter
+Atualizado PhoneWearContactsService.kt
+
+Corrigido MainActivity.kt
+
+pubspec.yaml e pubspec.lock atualizados
+
+Regeneração de plugins do macOS
+
+Ícone temporário flutter_02.png adicionado
+
+Removido widget_test default
 
 🧠 6. Preparação para integração com Mobile-Hub2 + ContextNet
 
-O projeto agora está pronto para:
+O projeto agora está preparado para:
 
-enviar sensores do wearable para MR-UDP / MQTT
+enviar dados do relógio para o backend
 
-usar o middleware Mobile-Hub2 descrito no artigo IEEE
+trabalhar com módulos: Core, WPAN, WWAN, MR-UDP, MQTT
 
-conectar-se ao backend inteligente de contexto
+usar o middleware distribuído descrito no artigo IEEE
 
 🏗 Arquitetura do Sistema
 Flutter App (Phone)
    ├─ Geolocalização + Reverse Geocoding
    ├─ Histórico de quedas
-   ├─ Envio de alertas SMS/WhatsApp
+   ├─ Envio automático de alertas
    ├─ Sincronização de contatos
-   └─ Interface/SOS manual
+   └─ Interface SOS
 
 Wear OS (Watch)
-   ├─ FallDetectionService (nativo + foreground)
+   ├─ FallDetectionService (Kotlin)
    ├─ WearSensorMonitor (Flutter)
    ├─ Botão SOS
-   ├─ Modo Dark exclusivo
-   └─ Envio de dados de sensores
+   ├─ Tela “Enviando alerta…”
+   └─ Sincronização automática de contatos
 
 Comunicação Celular ↔ Relógio
-   ├─ Data Layer API (MessageClient/NodeClient)
-   ├─ MethodChannel (Flutter ↔ Android nativo)
+   ├─ Data Layer API (Kotlin)
+   ├─ MessageClient / NodeClient
+   ├─ MethodChannel (Flutter ↔ Android)
    └─ JSON com contatos e eventos
 
-📡 Status Atual do Desenvolvimento
+⚙ Tecnologias
+Área	Tecnologia
+App Mobile	Flutter 3.22+
+Relógio	Wear OS + Kotlin
+Sensores	Acelerômetro / Giroscópio
+Persistência	SharedPreferences
+Comunicação	Data Layer + MethodChannel
+Localização	geolocator + geocoding
+Backend futuro	Mobile-Hub2 + ContextNet
+📡 Status Atual
 
-✔ Sincronização de contatos concluída
+✔ Sincronização de contatos funcional
 
-✔ Wear Sensor Service funcionando
+✔ Foreground Service do relógio funcionando
 
-✔ Monitor de sensores no Flutter funcional
+✔ Monitoramento de sensores integrado ao Flutter
 
-✔ Queda detectada no relógio
+✔ Histórico revisado e centralizado
 
-✔ Histórico centralizado
+❗ Falta pareamento real do Wear OS para sincronização completa
 
-❗ Falta pareamento real do Wear OS para testes de envio
+❗ Envio de sensores ao celular pendente
 
-⏳ Integração com backend Mobile-Hub2 em planejamento
+⏳ Preparação para Mobile-Hub2 iniciada
 
 🎯 Roadmap
 
- Pareamento real Wear OS
+ Parear Wear OS real
 
- Enviar sensores do relógio → celular
+ Transmitir sensores do relógio → celular
 
- Envio de SOS completo pelo relógio
+ Detecção de queda 100% no wearable
 
- Integração com ContextNet/Mobile-Hub2
+ Enviar SOS diretamente do relógio
+
+ Integrar Mobile-Hub2 (MR-UDP / MQTT)
 
  Criar dashboard em nuvem
 
- Criar widget de status no Wear
+ Adicionar gráficos de movimento
 
 📄 Licença
 
 Projeto acadêmico — livre para estudo e evolução.
+
+<div align="center"> Feito para o TCC — DropWarnify </div>

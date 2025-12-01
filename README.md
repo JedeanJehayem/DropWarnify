@@ -1,157 +1,168 @@
+🚨 DropWarnify
+Sistema Inteligente de Detecção e Alerta de Quedas
 
-# 🚨 DropWarnify  
-### Sistema Inteligente de Detecção e Alerta de Quedas  
-Flutter • Android • Wear OS  
+Flutter • Android • Wear OS
 
----
+<div align="center"> <img src="https://img.shields.io/badge/Flutter-3.22+-blue?logo=flutter" /> <img src="https://img.shields.io/badge/Wear%20OS-Data%20Layer-green?logo=wearos" /> <img src="https://img.shields.io/badge/Platform-Android-informational?logo=android" /> <img src="https://img.shields.io/badge/Status-Em%20Desenvolvimento-yellow" /> </div>
+📘 Sobre o Projeto
 
-<div align="center">
-  <img src="https://img.shields.io/badge/Flutter-3.22+-blue?logo=flutter" />
-  <img src="https://img.shields.io/badge/Wear%20OS-Data%20Layer-green?logo=wearos" />
-  <img src="https://img.shields.io/badge/Platform-Android-informational?logo=android" />
-  <img src="https://img.shields.io/badge/Status-Em%20Desenvolvimento-yellow" />
-</div>
+DropWarnify é um sistema completo de detecção e alerta de quedas integrado entre celular + smartwatch Wear OS, capaz de:
 
----
+monitorar sensores internos (acelerômetro / giroscópio)
 
-## 📘 Sobre o Projeto
+detectar quedas, quase quedas e movimentos bruscos
 
-**DropWarnify** é um sistema completo de detecção de quedas integrado entre **celular + smartwatch Wear OS**, capaz de enviar alertas automáticos via SMS/WhatsApp, incluir localização aproximada e permitir acionamento manual pelo relógio.
+enviar alertas automáticos (SMS/WhatsApp)
 
-Atualmente, o projeto está evoluindo para suportar **sincronização automática de contatos** entre celular e relógio, usando a *Wear OS Data Layer API*.
+enviar localização aproximada
 
----
+permitir acionamento manual via SOS no relógio
 
-## 🏗 Arquitetura do Sistema
+sincronizar contatos do celular → relógio
 
-```
+Hoje o projeto ganhou grandes módulos novos, incluindo um serviço nativo no relógio que mantém sensores ativos continuamente.
+
+🆕 Atualizações de Hoje (01/12/2025)
+🔥 1. Implementação do serviço nativo de sensores (Wear OS)
+
+Criamos o arquivo:
+
+android/app/src/main/kotlin/.../FallDetectionService.kt
+
+
+Esse serviço:
+
+roda em Foreground (não é finalizado pelo Wear OS)
+
+recebe sensores do relógio via Kotlin
+
+envia dados para Flutter via MethodChannel
+
+está preparado para transmitir amostras para o celular
+
+Também adicionamos as permissões:
+
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+📡 2. Novo módulo WearSensorMonitor (Flutter)
+
+Criado:
+
+lib/services/wear_sensor_monitor.dart
+
+
+Ele:
+
+recebe dados em tempo real do serviço nativo
+
+detecta quedas simples diretamente no relógio
+
+mantém análise mesmo com o app fechado
+
+🔗 3. Nova ponte Wear → Phone (fall_service_bridge.dart)
+
+Criado:
+
+lib/wear/fall_service_bridge.dart
+
+
+Ele vai:
+
+enviar sinais de SOS
+
+sincronizar estado do sensor
+
+transmitir eventos futuramente para o ContextNet (Mobile-Hub2)
+
+🗃 4. Novo repositório de histórico centralizado
+
+Criado:
+
+lib/services/fall_history_repository.dart
+
+
+Agora o histórico não depende mais apenas da UI.
+
+🧹 5. Limpeza e reestruturação
+
+Removido sensor_service.dart (obsoleto)
+
+Ajustado home_screen.dart para usar monitoramento real
+
+Ajustado history_screen.dart
+
+Ajustado wear_contacts_bridge.dart
+
+Atualizado pubspec.yaml
+
+Corrigido MainActivity.kt e PhoneWearContactsService.kt
+
+Criado ícone temporário flutter_02.png
+
+Removido teste placeholder default do Flutter
+
+🧠 6. Preparação para integração com Mobile-Hub2 + ContextNet
+
+O projeto agora está pronto para:
+
+enviar sensores do wearable para MR-UDP / MQTT
+
+usar o middleware Mobile-Hub2 descrito no artigo IEEE
+
+conectar-se ao backend inteligente de contexto
+
+🏗 Arquitetura do Sistema
 Flutter App (Phone)
-   ├─ Leitura de sensores
-   ├─ Envio de alertas (SMS / WhatsApp)
    ├─ Geolocalização + Reverse Geocoding
-   ├─ Tela de status e histórico
-   └─ Contatos em SharedPreferences
+   ├─ Histórico de quedas
+   ├─ Envio de alertas SMS/WhatsApp
+   ├─ Sincronização de contatos
+   └─ Interface/SOS manual
 
-Wear OS App (Watch)
+Wear OS (Watch)
+   ├─ FallDetectionService (nativo + foreground)
+   ├─ WearSensorMonitor (Flutter)
    ├─ Botão SOS
-   ├─ Tela "Enviando alerta..."
    ├─ Modo Dark exclusivo
-   └─ Recebe contatos do celular (via Data Layer)
+   └─ Envio de dados de sensores
 
 Comunicação Celular ↔ Relógio
-   ├─ MessageClient / NodeClient
-   ├─ MethodChannel (Flutter ↔ Android)
-   └─ JSON com contatos via Data Layer
-```
+   ├─ Data Layer API (MessageClient/NodeClient)
+   ├─ MethodChannel (Flutter ↔ Android nativo)
+   └─ JSON com contatos e eventos
 
----
+📡 Status Atual do Desenvolvimento
 
-## ✨ Funcionalidades
+✔ Sincronização de contatos concluída
 
-### 📱 Aplicativo Android
-- Monitoramento real de queda  
-- Detecta "quase queda"  
-- Envio automático via SMS / WhatsApp  
-- Localização aproximada no alerta  
-- Histórico completo  
-- Simulação de queda  
-- Visualização da localização atual  
-- UI moderna e responsiva  
+✔ Wear Sensor Service funcionando
 
----
+✔ Monitor de sensores no Flutter funcional
 
-### ⌚ Aplicativo Wear OS
-- Botão SOS  
-- Tela com animação "Enviando alerta…"  
-- Modo Dark exclusivo  
-- Recebe contatos do celular*  
-- Sincronização automática via Data Layer*  
+✔ Queda detectada no relógio
 
-\* Em fase final de integração  
+✔ Histórico centralizado
 
----
+❗ Falta pareamento real do Wear OS para testes de envio
 
-## 🔌 Tecnologias Utilizadas
+⏳ Integração com backend Mobile-Hub2 em planejamento
 
-| Componente | Tecnologia |
-|-----------|------------|
-| App principal | Flutter 3.22+ |
-| Comunicação Wear OS | Data Layer API (Kotlin) |
-| Sensores | sensors_plus |
-| Localização | geolocator + geocoding |
-| Persistência | SharedPreferences |
-| Integração nativa | MethodChannel |
-| Mapas | flutter_map + latlong2 |
+🎯 Roadmap
 
----
+ Pareamento real Wear OS
 
-## 🛠 Como Executar
+ Enviar sensores do relógio → celular
 
-### 1️⃣ Executar app do celular  
-```bash
-flutter run -d emulator-5554
-```
+ Envio de SOS completo pelo relógio
 
-### 2️⃣ Executar app do relógio  
-```bash
-flutter run -d emulator-5556
-```
+ Integração com ContextNet/Mobile-Hub2
 
-> 💡 **Importante**:  
-> O emulador do celular precisa ter Google Play Store.  
-> O app “Google Pixel Watch” deve ser instalado para parear ambos os dispositivos.
+ Criar dashboard em nuvem
 
----
+ Criar widget de status no Wear
 
-## 🔄 Pareamento Wear OS ↔ Android
+📄 Licença
 
-1. Abra **Android Studio** → Device Manager  
-2. Clique no relógio → `⋮`  
-3. Selecione **Pair with Mobile Device**  
-4. Instale **Google Pixel Watch** no emulador do celular  
-5. Conclua o pareamento  
-6. Rode os apps novamente
-
-O relógio então passa a sincronizar automaticamente os contatos.
-
----
-
-## 📡 Status Atual do Desenvolvimento
-
-- ✔ Código Flutter funcional  
-- ✔ WearContactsBridge implementado  
-- ✔ Serviço PhoneWearContactsService funcionando  
-- ✔ MessageClient configurado  
-- ❗ Falta concluir PAREAMENTO real do Wear OS  
-- ❗ Sincronização ainda não ocorre (por falta do pareamento)  
-- ⏳ Próxima etapa: integração com ContextNet + Mobile-Hub  
-
----
-
-## 🎯 Roadmap
-
-- [ ] Finalizar pareamento Wear OS  
-- [ ] Validar sincronização automática dos contatos  
-- [ ] Testar envio de alerta direto pelo relógio  
-- [ ] Conectar sensores a backend inteligente (ContextNet)  
-- [ ] Dashboard em nuvem  
-
----
-
-## 📸 Screenshots
-*(Adicione quando quiser)*
-
-```md
-![screenshot1](images/screen1.png)
-```
-
----
-
-## 📄 Licença  
 Projeto acadêmico — livre para estudo e evolução.
-
----
-
-<div align="center">
-Feito para o TCC — DropWarnify  
-</div>

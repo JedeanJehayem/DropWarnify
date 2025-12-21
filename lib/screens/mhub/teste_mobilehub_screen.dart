@@ -27,10 +27,7 @@ class _TesteMobileHubScreenState extends State<TesteMobileHubScreen> {
     try {
       _log('Conectando ao servidor...');
 
-      await mhub.start(
-        ipAddress: 'SEU_IP_AQUI', // ⚠️ coloca o IP real do M-Hub
-        port: 12345, // ⚠️ e a porta real
-      );
+      await mhub.start(ipAddress: '10.0.2.2', port: 6200);
 
       final started = await mhub.isStarted();
       _log('MobileHub isStarted = $started');

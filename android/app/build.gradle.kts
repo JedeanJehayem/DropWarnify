@@ -54,9 +54,11 @@ flutter {
 }
 
 dependencies {
-    // Wear OS – comunicação com o relógio
     implementation("com.google.android.gms:play-services-wearable:18.1.0")
-
-    // 📍 Localização nativa (FusedLocationProviderClient, LocationRequest, etc.)
     implementation("com.google.android.gms:play-services-location:21.3.0")
+
+    // RxJava2 (necessário pro MobileHub / Disposable)
+    implementation ("io.reactivex.rxjava2:rxjava:2.2.21")
+    implementation("io.reactivex.rxjava2:rxandroid:2.1.1")
 }
+

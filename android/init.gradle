@@ -1,0 +1,13 @@
+gradle.settingsEvaluated { settings ->
+    println "========== DIAGNOSTIC =========="
+    println "user.name=" + System.getProperty("user.name")
+    println "os.name=" + System.getProperty("os.name")
+    println "os.arch=" + System.getProperty("os.arch")
+    println "java.version=" + System.getProperty("java.version")
+    println "java.home=" + System.getProperty("java.home")
+    println "java.io.tmpdir=" + System.getProperty("java.io.tmpdir")
+    println "env.TEMP=" + System.getenv("TEMP")
+    println "env.TMP=" + System.getenv("TMP")
+    println "env.JAVA_HOME=" + System.getenv("JAVA_HOME")
+    println "================================"
+}
